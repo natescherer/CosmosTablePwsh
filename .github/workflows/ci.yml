@@ -1,0 +1,108 @@
+name: CI
+on: 
+  push:
+    paths-ignore:
+    - '**.md'
+  workflow_dispatch:
+jobs:
+  Test:
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: pwsh
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        shell: [pwsh, powershell]
+        exclude:
+          - os: ubuntu-latest
+            shell: powershell
+          - os: macos-latest
+            shell: powershell
+    steps:
+      - name: Set Variables
+        run: |
+          "BARE_REPOSITORY=$($env:GITHUB_REPOSITORY.split("/")[1])" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf-8 -Append
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Setup Go environment
+        uses: actions/setup-go@v2
+        with:
+          go-version: '1.10'
+      - name: Run Pester Tests
+        id: pester
+        uses: zyborg/pester-tests-report@v1
+        with:
+          report_name: TestResults_${{ runner.os }}_${{ matrix.shell }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          gist_name: ${{ env.BARE_REPOSITORY }}_TestResults_${{ runner.os }}_${{ matrix.shell }}.md
+          gist_badge_label: ${{ runner.os }} ${{ matrix.shell }}
+          gist_token: ${{ secrets.PESTER_GIST_TOKEN }}
+          tests_fail_step: true
+          coverage_paths: src
+          coverage_report_name: CoverageResults_${{ runner.os }}_${{ matrix.shell }}
+          coverage_gist: true
+          coverage_gist_badge_label: Code Coverage
+      - name: Convert Path for Codecov Action
+        run: |
+          if [[ "${{ matrix.os }}" -eq "windows-latest" ]] 
+          then
+            echo "CODE_COVERAGE_PATH=$(cygpath -u '${{ steps.pester.outputs.coverage_results_path }}')" >> $GITHUB_ENV
+          else
+            echo "CODE_COVERAGE_PATH=${{ steps.pester.outputs.coverage_results_path }}" >> $GITHUB_ENV
+          fi
+        shell: bash
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v1
+        with:
+          files: ${{ env.CODE_COVERAGE_PATH }}
+          fail_ci_if_error: true
+  PublishToPackages:
+    needs: Test
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+      - name: Install Modules
+        run: |
+          Set-PSRepository -Name "PSGallery" -InstallationPolicy Trusted
+          Install-Module -Name Mailozaurr -RequiredVersion "0.0.10"
+      - name: Ensure nuget is set up properly
+        uses: fabriciomurta/ensure-nuget-source@v1
+      - name: Install GitVersion
+        uses: gittools/actions/gitversion/setup@v0
+        with:
+          versionSpec: '5.x'
+      - name: Determine Version
+        id: gitversion
+        uses: gittools/actions/gitversion/execute@v0
+      - name: Remove Dashes from Prerelease String
+        id: cleanversion
+        run: |
+          $CleanVersion = "${{ steps.gitversion.outputs.NuGetPreReleaseTagV2 }}" -replace "-",""
+          $CleanVersion = "${{ steps.gitversion.outputs.MajorMinorPatch }}" + "-" + $CleanVersion
+          Write-Output -InputObject "::set-output name=cleanversion::$CleanVersion"
+      - name: Update PowerShell Metadata
+        uses: natescherer/update-powershell-metadata-action@main
+        with:
+          path: src
+          version: ${{ steps.cleanversion.outputs.cleanversion }}
+          copyright: (c) YYYY Nate Scherer. All rights reserved.
+          functionstoexportpath: src\public
+      - name: Publish Module to Packages
+        uses: natescherer/publish-powershell-action@main
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          target: packages
+          path: src
+      - name: Publish Artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: testartifact
+          path: ${{ github.workspace }}
